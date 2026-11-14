@@ -1,6 +1,16 @@
-// Procedural Web Audio API sound engine for the Royal No. 10 mechanical typewriter.
-// Uses normalized pink/white noise buffers and a warm master compressor so keystrokes,
-// platen ratchets, and cotton paper swishes sound punchy, tactile, and clip-free.
+// Real CC0 studio mechanical typewriter & cotton paper Web Audio sample engine
+import {SFX_B64} from './sfx_bank.js';
+
+function b64ToArrayBuffer(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i += 1) {
+    bytes[i] = bin.charCodeAt(i);
+  }
+  return bytes.buffer;
+}
+
+const KEY_POOL = ['key_01', 'key_02', 'key_03', 'key_04', 'key_05', 'key_06'];
 
 export class TypewriterAudio {
   constructor() {
@@ -10,9 +20,11 @@ export class TypewriterAudio {
     this.outputGain = null;
     this.soundEnabled = true;
     this.rainEnabled = false;
-    this.noiseBuffer = null;
-    this.crispBuffer = null;
-    this.rainNodes = null;
+    this.buffers = {};
+    this._preloadPromise = null;
+    this._keyIndex = 0;
+    this._rainNodes = null;
+    this._rainBuffer = null;
   }
 
   ensureContext() {
@@ -21,326 +33,230 @@ export class TypewriterAudio {
       this.ctx = new AudioCtx();
 
       this.masterGain = this.ctx.createGain();
-      this.masterGain.gain.value = 1.35;
+      this.masterGain.gain.value = this.soundEnabled ? 1.0 : 0.0;
 
       this.compressor = this.ctx.createDynamicsCompressor();
-      this.compressor.threshold.setValueAtTime(-14, this.ctx.currentTime);
-      this.compressor.knee.setValueAtTime(12, this.ctx.currentTime);
-      this.compressor.ratio.setValueAtTime(4, this.ctx.currentTime);
-      this.compressor.attack.setValueAtTime(0.002, this.ctx.currentTime);
-      this.compressor.release.setValueAtTime(0.08, this.ctx.currentTime);
+      this.compressor.threshold.value = -10;
+      this.compressor.knee.value = 12;
+      this.compressor.ratio.value = 2.6;
+      this.compressor.attack.value = 0.002;
+      this.compressor.release.value = 0.06;
 
       this.outputGain = this.ctx.createGain();
-      this.outputGain.gain.value = 1.65;
+      this.outputGain.gain.value = 1.25;
 
       this.masterGain.connect(this.compressor);
       this.compressor.connect(this.outputGain);
       this.outputGain.connect(this.ctx.destination);
 
-      this.noiseBuffer = this._createNoiseBuffer(2.0, 0.28);
-      this.crispBuffer = this._createNoiseBuffer(2.0, 0.85);
+      this._preloadSamples();
     }
     if (this.ctx.state === 'suspended') {
-      this.ctx.resume();
+      this.ctx.resume().catch(() => {});
     }
+    return this.ctx;
   }
 
-  _createNoiseBuffer(seconds, brightness = 0.3) {
-    const length = Math.floor(this.ctx.sampleRate * seconds);
-    const buffer = this.ctx.createBuffer(1, length, this.ctx.sampleRate);
-    const data = buffer.getChannelData(0);
-    let lastOut = 0;
-    let peak = 0;
-    const mix = 1 - brightness;
-    for (let i = 0; i < length; i++) {
-      const white = Math.random() * 2 - 1;
-      lastOut = lastOut * mix + white * brightness;
-      data[i] = lastOut;
-      const a = Math.abs(lastOut);
-      if (a > peak) peak = a;
+  _preloadSamples() {
+    if (this._preloadPromise || !this.ctx) {
+      return this._preloadPromise || Promise.resolve();
     }
-    const norm = peak > 0 ? 0.96 / peak : 1;
-    for (let i = 0; i < length; i++) data[i] *= norm;
-    return buffer;
+    const entries = Object.entries(SFX_B64);
+    this._preloadPromise = Promise.all(
+      entries.map(async ([name, b64]) => {
+        try {
+          const decoded = await this.ctx.decodeAudioData(b64ToArrayBuffer(b64));
+          this.buffers[name] = decoded;
+        } catch (err) {
+          console.warn(`Failed to decode sample "${name}":`, err);
+        }
+      })
+    );
+    return this._preloadPromise;
   }
 
   setSoundEnabled(enabled) {
-    this.soundEnabled = enabled;
+    this.soundEnabled = Boolean(enabled);
+    if (this.masterGain && this.ctx) {
+      this.masterGain.gain.setTargetAtTime(
+        this.soundEnabled ? 1.0 : 0.0,
+        this.ctx.currentTime,
+        0.02
+      );
+    }
+  }
+
+  _triggerBuffer(buf, {gain = 0.9, rate = 1.0, pan = 0} = {}) {
+    if (!this.ctx || !this.soundEnabled || !buf) return;
+    const now = this.ctx.currentTime;
+    const src = this.ctx.createBufferSource();
+    src.buffer = buf;
+    src.playbackRate.setValueAtTime(rate, now);
+
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(gain, now);
+
+    if (pan !== 0 && typeof this.ctx.createStereoPanner === 'function') {
+      const panner = this.ctx.createStereoPanner();
+      panner.pan.setValueAtTime(Math.max(-1, Math.min(1, pan)), now);
+      src.connect(g);
+      g.connect(panner);
+      panner.connect(this.masterGain);
+    } else {
+      src.connect(g);
+      g.connect(this.masterGain);
+    }
+    src.start(now);
+  }
+
+  _playSample(name, opts = {}) {
+    if (!this.soundEnabled) return;
+    const requestedAt = performance.now();
+    this.ensureContext();
+    const buf = this.buffers[name];
+    if (buf) {
+      this._triggerBuffer(buf, opts);
+      return;
+    }
+    this._preloadSamples().then(() => {
+      if (performance.now() - requestedAt > 250) return;
+      const loaded = this.buffers[name];
+      if (loaded) {
+        this._triggerBuffer(loaded, opts);
+      }
+    });
   }
 
   playKeyStrike(pitchOffset = 0) {
-    if (!this.soundEnabled) return;
-    this.ensureContext();
-    const now = this.ctx.currentTime + 0.004;
-    const jitter = (Math.random() - 0.5) * 0.12 + pitchOffset * 0.04;
-
-    this._noiseBurst(now, 0.016, 2800 * (1 + jitter), 1.8, 0.58);
-
-    const impactTime = now + 0.015;
-    this._noiseBurst(impactTime, 0.028, 1650 * (1 + jitter), 1.3, 0.85);
-    this._bodyThump(impactTime, 178 * (1 + jitter * 0.6), 62, 0.06, 0.62);
-    this._tonePing(impactTime, 920 * (1 + jitter * 0.3), 0.065, 0.095);
+    // Advance round-robin with subtle skip so rapid typing spans all real typebars naturally
+    const step = 1 + (Math.random() > 0.65 ? 1 : 0);
+    this._keyIndex = (this._keyIndex + step) % KEY_POOL.length;
+    const clip = KEY_POOL[this._keyIndex];
+    const rate = 0.96 + pitchOffset * 0.015 + Math.random() * 0.07;
+    const gain = 0.88 + Math.random() * 0.14;
+    const pan = Math.max(-0.22, Math.min(0.22, pitchOffset * 0.06));
+    this._playSample(clip, {gain, rate, pan});
   }
 
   playKeyRelease() {
-    if (!this.soundEnabled) return;
-    this.ensureContext();
-    const now = this.ctx.currentTime + 0.003;
-    this._noiseBurst(now, 0.014, 3400 + Math.random() * 500, 2.2, 0.18);
+    this._playSample('release_01', {
+      gain: 0.28 + Math.random() * 0.08,
+      rate: 0.94 + Math.random() * 0.12,
+      pan: (Math.random() - 0.5) * 0.08,
+    });
   }
 
   playSpace() {
-    if (!this.soundEnabled) return;
-    this.ensureContext();
-    const now = this.ctx.currentTime + 0.004;
-    const jitter = (Math.random() - 0.5) * 0.08;
-    this._noiseBurst(now, 0.026, 980 * (1 + jitter), 1.2, 0.55);
-    this._bodyThump(now, 124 * (1 + jitter), 46, 0.08, 0.7);
+    this._playSample('space_01', {
+      gain: 0.96,
+      rate: 0.97 + Math.random() * 0.05,
+      pan: 0,
+    });
   }
 
   playBackspace() {
-    if (!this.soundEnabled) return;
-    this.ensureContext();
-    const now = this.ctx.currentTime + 0.004;
-    this._noiseBurst(now, 0.02, 2000, 2.0, 0.48);
-    this._bodyThump(now, 220, 92, 0.05, 0.42);
+    this._playSample('backspace_01', {
+      gain: 0.88,
+      rate: 0.97 + Math.random() * 0.06,
+      pan: 0.08,
+    });
   }
 
   playBell() {
-    if (!this.soundEnabled) return;
-    this.ensureContext();
-    const now = this.ctx.currentTime + 0.004;
-    const partials = [
-      {freq: 1860, gain: 0.42, dur: 1.4},
-      {freq: 2795, gain: 0.22, dur: 0.95},
-      {freq: 3740, gain: 0.11, dur: 0.6},
-    ];
-    for (const p of partials) {
-      const osc = this.ctx.createOscillator();
-      const gain = this.ctx.createGain();
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(p.freq, now);
-      gain.gain.setValueAtTime(0.0001, now);
-      gain.gain.linearRampToValueAtTime(p.gain, now + 0.004);
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + p.dur);
-      osc.connect(gain);
-      gain.connect(this.masterGain);
-      osc.start(now);
-      osc.stop(now + p.dur + 0.02);
-    }
+    this._playSample('bell_01', {
+      gain: 0.92,
+      rate: 1.0,
+      pan: -0.14,
+    });
   }
 
   playCarriageReturn() {
-    if (!this.soundEnabled) return;
-    this.ensureContext();
-    const now = this.ctx.currentTime + 0.004;
-    this._noiseBurst(now, 0.026, 2100, 1.7, 0.58);
-
-    const steps = 9;
-    for (let i = 0; i < steps; i++) {
-      const t = now + 0.038 + i * 0.024;
-      this._noiseBurst(t, 0.013, 1450 + i * 90, 2.4, 0.34);
-    }
-    const stopTime = now + 0.038 + steps * 0.024 + 0.02;
-    this._bodyThump(stopTime, 128, 42, 0.095, 0.78);
-    this._noiseBurst(stopTime, 0.032, 820, 1.2, 0.5);
+    this._playSample('carriage_01', {
+      gain: 0.98,
+      rate: 0.98 + Math.random() * 0.04,
+      pan: 0.04,
+    });
   }
 
-  // Pulling typed sheet upward out of platen & lifting it through the air
   playPaperPullOut() {
-    if (!this.soundEnabled) return;
-    this.ensureContext();
-    const now = this.ctx.currentTime + 0.005;
-
-    // Rapid accelerating platen-release ticks
-    let t = now;
-    for (let i = 0; i < 9; i++) {
-      const step = 0.024 - i * 0.0016;
-      this._noiseBurst(t, 0.013, 2100 + i * 140, 2.6, 0.38 + i * 0.02);
-      this._bodyThump(t, 320 + i * 18, 130, 0.018, 0.24);
-      t += step;
-    }
-
-    // Full crisp cotton bond slide swish & flutter
-    this._paperSweep(now + 0.015, 0.29, 1050, 3100, 0.95, 0.85);
-    this._paperSweep(now + 0.07, 0.24, 3600, 1900, 1.3, 0.52);
+    this._playSample('paper_eject', {
+      gain: 1.0,
+      rate: 0.98 + Math.random() * 0.04,
+      pan: -0.05,
+    });
   }
 
-  // Laying finished sheet neatly onto the left stack
   playPaperPlace() {
-    if (!this.soundEnabled) return;
-    this.ensureContext();
-    const now = this.ctx.currentTime + 0.004;
-    this._paperSweep(now, 0.14, 1750, 760, 0.9, 0.64);
-    this._bodyThump(now + 0.022, 122, 46, 0.07, 0.45);
-    this._noiseBurst(now + 0.025, 0.048, 1200, 1.2, 0.42);
+    this._playSample('paper_place', {
+      gain: 0.95,
+      rate: 0.97 + Math.random() * 0.05,
+      pan: -0.34,
+    });
   }
 
-  // Lifting fresh blank cotton sheet from right supply pile & slotting behind platen
   playPaperPick() {
-    if (!this.soundEnabled) return;
-    this.ensureContext();
-    const now = this.ctx.currentTime + 0.004;
-    this._paperSweep(now, 0.21, 1450, 3300, 1.1, 0.62);
-    this._noiseBurst(now + 0.11, 0.04, 2500, 1.7, 0.34);
-    const slotAt = now + 0.30;
-    this._paperSweep(slotAt, 0.09, 1850, 950, 1.1, 0.48);
-    this._bodyThump(slotAt + 0.01, 172, 68, 0.048, 0.38);
+    this._playSample('paper_pick', {
+      gain: 0.95,
+      rate: 0.98 + Math.random() * 0.04,
+      pan: 0.34,
+    });
   }
 
-  // Turning platen knob to feed fresh sheet around cylinder with crisp pawl ratchet clicks
   playPaperFeed() {
-    if (!this.soundEnabled) return;
-    this.ensureContext();
-    const now = this.ctx.currentTime + 0.004;
+    this._playSample('paper_feed', {
+      gain: 1.0,
+      rate: 0.98 + Math.random() * 0.03,
+      pan: 0,
+    });
+  }
 
-    // Gentle curved cotton paper curl sound
-    this._paperSweep(now + 0.02, 0.44, 780, 1850, 0.9, 0.68);
-
-    // 11 tactile knurled platen ratchet clicks
-    let t = now;
-    const count = 11;
-    for (let i = 0; i < count; i++) {
-      const ease = i / count;
-      const gap = 0.028 + ease * ease * 0.024;
-      const amp = 0.5 + (i === count - 1 ? 0.16 : 0);
-      this._noiseBurst(t, 0.013, 2550 + (i % 3) * 190, 2.6, amp);
-      this._bodyThump(t, 385, 145, 0.02, 0.28);
-      t += gap;
+  _ensureRainBuffer() {
+    if (this._rainBuffer || !this.ctx) return this._rainBuffer;
+    const len = this.ctx.sampleRate * 4;
+    const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+    const ch = buf.getChannelData(0);
+    let last = 0;
+    for (let i = 0; i < len; i += 1) {
+      const white = Math.random() * 2 - 1;
+      last = (last + 0.035 * white) / 1.035;
+      ch[i] = last * 3.1;
     }
+    this._rainBuffer = buf;
+    return buf;
   }
 
   toggleRain() {
     this.ensureContext();
     this.rainEnabled = !this.rainEnabled;
-    if (this.rainEnabled) this._startRain();
-    else this._stopRain();
-    return this.rainEnabled;
-  }
 
-  _startRain() {
-    if (this.rainNodes) return;
-    const now = this.ctx.currentTime;
-    const src = this.ctx.createBufferSource();
-    src.buffer = this.noiseBuffer;
-    src.loop = true;
+    if (this.rainEnabled) {
+      if (!this._rainNodes) {
+        const src = this.ctx.createBufferSource();
+        src.buffer = this._ensureRainBuffer();
+        src.loop = true;
 
-    const lowpass = this.ctx.createBiquadFilter();
-    lowpass.type = 'lowpass';
-    lowpass.frequency.value = 1100;
+        const lp = this.ctx.createBiquadFilter();
+        lp.type = 'lowpass';
+        lp.frequency.value = 1450;
 
-    const highpass = this.ctx.createBiquadFilter();
-    highpass.type = 'highpass';
-    highpass.frequency.value = 180;
+        const hp = this.ctx.createBiquadFilter();
+        hp.type = 'highpass';
+        hp.frequency.value = 140;
 
-    const gain = this.ctx.createGain();
-    gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.linearRampToValueAtTime(0.36, now + 1.0);
+        const rainGain = this.ctx.createGain();
+        rainGain.gain.value = 0.0001;
 
-    src.connect(highpass);
-    highpass.connect(lowpass);
-    lowpass.connect(gain);
-    gain.connect(this.masterGain);
-    src.start(now);
-    this.rainNodes = {src, gain};
-  }
-
-  _stopRain() {
-    if (!this.rainNodes) return;
-    const now = this.ctx.currentTime;
-    const {src, gain} = this.rainNodes;
-    gain.gain.cancelScheduledValues(now);
-    gain.gain.setValueAtTime(Math.max(gain.gain.value, 0.0001), now);
-    gain.gain.linearRampToValueAtTime(0.0001, now + 0.6);
-    setTimeout(() => {
-      try {
-        src.stop();
-        src.disconnect();
-      } catch {
-        // ignore
+        src.connect(hp);
+        hp.connect(lp);
+        lp.connect(rainGain);
+        rainGain.connect(this.masterGain);
+        src.start();
+        this._rainNodes = {src, gain: rainGain};
       }
-    }, 650);
-    this.rainNodes = null;
-  }
-
-  _noiseBurst(time, duration, freq, q, peakGain) {
-    const src = this.ctx.createBufferSource();
-    src.buffer = this.crispBuffer || this.noiseBuffer;
-    src.playbackRate.value = 0.88 + Math.random() * 0.28;
-
-    const filter = this.ctx.createBiquadFilter();
-    filter.type = 'bandpass';
-    filter.frequency.setValueAtTime(freq, time);
-    filter.Q.setValueAtTime(q, time);
-
-    const gain = this.ctx.createGain();
-    gain.gain.setValueAtTime(0.0001, time);
-    gain.gain.linearRampToValueAtTime(peakGain, time + 0.002);
-    gain.gain.exponentialRampToValueAtTime(0.0001, time + duration);
-
-    src.connect(filter);
-    filter.connect(gain);
-    gain.connect(this.masterGain);
-    src.start(time, Math.random() * 1.1, duration + 0.015);
-  }
-
-  _paperSweep(time, duration, startFreq, endFreq, q, peakGain) {
-    const src = this.ctx.createBufferSource();
-    src.buffer = this.crispBuffer || this.noiseBuffer;
-    src.playbackRate.value = 0.92 + Math.random() * 0.18;
-
-    const hp = this.ctx.createBiquadFilter();
-    hp.type = 'highpass';
-    hp.frequency.setValueAtTime(380, time);
-
-    const bp = this.ctx.createBiquadFilter();
-    bp.type = 'bandpass';
-    bp.frequency.setValueAtTime(startFreq, time);
-    bp.frequency.exponentialRampToValueAtTime(Math.max(120, endFreq), time + duration);
-    bp.Q.setValueAtTime(q, time);
-
-    const gain = this.ctx.createGain();
-    gain.gain.setValueAtTime(0.0001, time);
-    gain.gain.linearRampToValueAtTime(peakGain, time + duration * 0.14);
-    gain.gain.exponentialRampToValueAtTime(0.0001, time + duration);
-
-    src.connect(hp);
-    hp.connect(bp);
-    bp.connect(gain);
-    gain.connect(this.masterGain);
-    src.start(time, Math.random() * 0.9, duration + 0.02);
-  }
-
-  _bodyThump(time, startFreq, endFreq, duration, peakGain) {
-    const osc = this.ctx.createOscillator();
-    const gain = this.ctx.createGain();
-    osc.type = 'triangle';
-    osc.frequency.setValueAtTime(startFreq, time);
-    osc.frequency.exponentialRampToValueAtTime(endFreq, time + duration);
-
-    gain.gain.setValueAtTime(0.0001, time);
-    gain.gain.linearRampToValueAtTime(peakGain, time + 0.0025);
-    gain.gain.exponentialRampToValueAtTime(0.0001, time + duration);
-
-    osc.connect(gain);
-    gain.connect(this.masterGain);
-    osc.start(time);
-    osc.stop(time + duration + 0.015);
-  }
-
-  _tonePing(time, freq, duration, peakGain) {
-    const osc = this.ctx.createOscillator();
-    const gain = this.ctx.createGain();
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(freq, time);
-
-    gain.gain.setValueAtTime(0.0001, time);
-    gain.gain.linearRampToValueAtTime(peakGain, time + 0.002);
-    gain.gain.exponentialRampToValueAtTime(0.0001, time + duration);
-
-    osc.connect(gain);
-    gain.connect(this.masterGain);
-    osc.start(time);
-    osc.stop(time + duration + 0.015);
+      this._rainNodes.gain.gain.setTargetAtTime(0.18, this.ctx.currentTime, 0.35);
+    } else if (this._rainNodes) {
+      this._rainNodes.gain.gain.setTargetAtTime(0.0001, this.ctx.currentTime, 0.25);
+    }
+    return this.rainEnabled;
   }
 }
