@@ -39,7 +39,7 @@
 
 ```bash
 # 1. โคลนโปรเจคจาก GitHub
-git clone https://github.com/Guu3t/royal-no10-typewriter.git
+git clone https://github.com/Nathann-12/royal-no10-typewriter.git
 cd royal-no10-typewriter
 
 # 2. ติดตั้ง dependencies (three, esbuild, fonts)

@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "description": "Interactive 3D Royal No. 10 (1938) Mechanical Typewriter Studio with kinematic teardown cutaways, emerald banker's lamp desk, procedural Web Audio foley, animated sheet transitions, and typed archive viewer.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Nathann-12/royal-no10-typewriter.git"
+  },
   "license": "MIT",
   "scripts": {
     "build": "node scripts/build.mjs",
