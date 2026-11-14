@@ -8,6 +8,7 @@ import {GTAOPass} from 'three/addons/postprocessing/GTAOPass.js';
 import {OutputPass} from 'three/addons/postprocessing/OutputPass.js';
 import {Pass} from 'three/addons/postprocessing/Pass.js';
 import {RenderPass} from 'three/addons/postprocessing/RenderPass.js';
+import {SMAAPass} from 'three/addons/postprocessing/SMAAPass.js';
 import {createWoodTextures} from './textures.js';
 import {buildTypewriter} from './typewriter.js';
 
@@ -17,7 +18,7 @@ export function createTypewriterStage({canvas, paperCanvas, look = {}}) {
   const renderer = new THREE.WebGLRenderer({
     canvas,
     antialias: false,
-    preserveDrawingBuffer: true,
+    preserveDrawingBuffer: false,
     powerPreference: 'high-performance',
   });
   renderer.toneMapping = THREE.NeutralToneMapping;
@@ -25,6 +26,8 @@ export function createTypewriterStage({canvas, paperCanvas, look = {}}) {
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.VSMShadowMap;
+  renderer.shadowMap.autoUpdate = false;
+  renderer.shadowMap.needsUpdate = true;
   renderer.localClippingEnabled = true;
 
   const scene = new THREE.Scene();
@@ -32,11 +35,12 @@ export function createTypewriterStage({canvas, paperCanvas, look = {}}) {
   scene.fog = new THREE.FogExp2('#0d0b09', 0.34);
 
   const camera = new THREE.PerspectiveCamera(32, 16 / 9, 0.02, 20);
+  // Avoid HalfFloat MSAA FBO resolves (severe ANGLE D3D11 stalls); SMAAPass handles anti-aliasing below
   const composer = new EffectComposer(
     renderer,
     new THREE.WebGLRenderTarget(4, 4, {
       type: THREE.HalfFloatType,
-      samples: 8,
+      samples: 0,
       stencilBuffer: true,
     }),
   );
@@ -50,7 +54,7 @@ export function createTypewriterStage({canvas, paperCanvas, look = {}}) {
     distanceExponent: 1.4,
     thickness: 0.55,
     scale: 1.0,
-    samples: 16,
+    samples: 8,
     distanceFallOff: 1.0,
     screenSpaceRadius: false,
   });
@@ -59,8 +63,8 @@ export function createTypewriterStage({canvas, paperCanvas, look = {}}) {
     depthPhi: 2,
     normalPhi: 3,
     radius: 6,
-    rings: 2,
-    samples: 16,
+    rings: 1,
+    samples: 8,
   });
 
   class Toggle extends Pass {
@@ -354,6 +358,9 @@ export function createTypewriterStage({canvas, paperCanvas, look = {}}) {
   composer.addPass(new Toggle(() => aoSkip(false)));
   composer.addPass(gtao);
   composer.addPass(new Toggle(() => aoSkip(true)));
+  // SMAAPass operates in linear-srgb, so run before OutputPass tone/sRGB transform
+  const smaa = new SMAAPass();
+  composer.addPass(smaa);
   composer.addPass(new OutputPass());
 
   // Studio + cozy warm room PMREM reflections so chrome, brass, glass & enamel shine
@@ -406,9 +413,9 @@ export function createTypewriterStage({canvas, paperCanvas, look = {}}) {
     near: 0.15,
     far: 3.5,
   });
-  keyLight.shadow.mapSize.set(2048, 2048);
-  keyLight.shadow.radius = 9;
-  keyLight.shadow.blurSamples = 18;
+  keyLight.shadow.mapSize.set(1024, 1024);
+  keyLight.shadow.radius = 6;
+  keyLight.shadow.blurSamples = 8;
   keyLight.shadow.bias = -0.0003;
   keyLight.shadow.normalBias = 0.002;
   scene.add(keyLight, keyLight.target);
@@ -421,6 +428,13 @@ export function createTypewriterStage({canvas, paperCanvas, look = {}}) {
   rimLight.position.set(0.06, 0.55, -0.76);
   scene.add(rimLight);
 
+  let shadowDirty = 2;
+  let shadowIdleTail = 0;
+  let lastShadowSig = '';
+  const markShadowsDirty = () => {
+    shadowDirty = Math.max(shadowDirty, 1);
+  };
+
   const setLamp = (on) => {
     keyLight.color.set(on ? '#ffe4ba' : '#bfd4f2');
     keyLight.intensity = on ? 2.4 : 1.35;
@@ -429,6 +443,7 @@ export function createTypewriterStage({canvas, paperCanvas, look = {}}) {
     bulbLight.intensity = on ? 0.24 : 0;
     shadeMat.emissiveIntensity = on ? 0.52 : 0.06;
     lampGlowMat.color.set(on ? '#ffe2ad' : '#35312c');
+    markShadowsDirty();
   };
 
   const size = {w: 1600, h: 900};
@@ -439,12 +454,34 @@ export function createTypewriterStage({canvas, paperCanvas, look = {}}) {
     renderer.setSize(w, h, false);
     composer.setPixelRatio(pr);
     composer.setSize(w, h);
+    gtao.setSize(
+      Math.max(2, Math.floor(w * pr * 0.5)),
+      Math.max(2, Math.floor(h * pr * 0.5)),
+    );
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
   };
 
   const frame = (state, cam) => {
     const kin = tw.update(state);
+    const moving =
+      kin.travel > 0.0005 ||
+      (state.returnProgress ?? 0) > 0.0005 ||
+      flyingOut.visible ||
+      flyingIn.visible;
+    const sig = `${(state.carriageCol ?? 0).toFixed(3)}|${(state.explode ?? 0).toFixed(3)}|${state.hidePaper ? 1 : 0}|${(state.paperFeedOffset ?? 0).toFixed(2)}|${finishedSheets.length}`;
+    if (moving || sig !== lastShadowSig) {
+      lastShadowSig = sig;
+      renderer.shadowMap.needsUpdate = true;
+      shadowIdleTail = 1;
+    } else if (shadowDirty > 0) {
+      shadowDirty--;
+      renderer.shadowMap.needsUpdate = true;
+    } else if (shadowIdleTail > 0) {
+      shadowIdleTail--;
+      renderer.shadowMap.needsUpdate = true;
+    }
+
     const {tx, ty, tz, az, el, d} = cam;
     camera.position.set(
       tx + d * Math.cos(el) * Math.sin(az),
@@ -472,7 +509,7 @@ export function createTypewriterStage({canvas, paperCanvas, look = {}}) {
     return [(pv.x * 0.5 + 0.5) * size.w, (-pv.y * 0.5 + 0.5) * size.h];
   };
 
-  const setQuality = ({samples, ao, shadow}) => {
+  const setQuality = ({samples, ao, smaa: enableSmaa, shadow}) => {
     if (samples !== undefined) {
       for (const t of [composer.renderTarget1, composer.renderTarget2]) {
         t.samples = samples;
@@ -480,17 +517,24 @@ export function createTypewriterStage({canvas, paperCanvas, look = {}}) {
       }
     }
     if (ao !== undefined) gtao.enabled = ao;
+    if (enableSmaa !== undefined) smaa.enabled = enableSmaa;
     if (shadow !== undefined) {
       keyLight.shadow.mapSize.set(shadow, shadow);
       keyLight.shadow.map?.dispose();
       keyLight.shadow.map = null;
+      markShadowsDirty();
     }
   };
 
+  let gtaoCutMode = '';
   const setCut = (mode, xWorld = 0) => {
     tw.setCut(mode, xWorld);
-    gtao.normalMaterial.clippingPlanes = mode === 'section' ? [tw.CLIP] : null;
-    gtao.normalMaterial.needsUpdate = true;
+    if (mode !== gtaoCutMode) {
+      gtaoCutMode = mode;
+      gtao.normalMaterial.clippingPlanes = mode === 'section' ? [tw.CLIP] : null;
+      gtao.normalMaterial.needsUpdate = true;
+      markShadowsDirty();
+    }
   };
 
   return {
@@ -500,6 +544,7 @@ export function createTypewriterStage({canvas, paperCanvas, look = {}}) {
     tw,
     composer,
     gtao,
+    smaa,
     resize,
     frame,
     project,

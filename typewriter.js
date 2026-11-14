@@ -1015,7 +1015,10 @@ export function buildTypewriter(paperCanvas, opts = {}) {
     M.shell.color.set(t.color);
   };
 
+  let lastStrikeFromBottom = NaN;
   const updatePaperCurve = (strikeFromBottom) => {
+    if (strikeFromBottom === lastStrikeFromBottom) return;
+    lastStrikeFromBottom = strikeFromBottom;
     const geo = paperMesh.geometry;
     const pos = geo.attributes.position;
     const pR = M_SPEC.platenR + 1.1;

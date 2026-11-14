@@ -108,10 +108,12 @@ function runApp() {
   st.setCut('solid', 0);
   st.setLamp(true);
 
+  let perfLevel = 0;
   const fit = () => {
     const w = Math.max(320, innerWidth);
     const h = Math.max(240, innerHeight);
-    st.resize(w, h, clamp(devicePixelRatio || 1, 1, 2));
+    const maxPr = perfLevel >= 1 ? 1 : 1.5;
+    st.resize(w, h, clamp(devicePixelRatio || 1, 1, maxPr));
   };
   fit();
   addEventListener('resize', fit);
@@ -416,6 +418,7 @@ function runApp() {
   const ndc = new THREE.Vector2();
   let drag = null;
   let downPos = {x: 0, y: 0};
+  let lastHoverMs = 0;
 
   canvas.addEventListener('pointerdown', (e) => {
     drag = {x: e.clientX, y: e.clientY};
@@ -432,6 +435,9 @@ function runApp() {
       return;
     }
     if (!ui.isArchiveOpen()) {
+      const nowMs = performance.now();
+      if (nowMs - lastHoverMs < 40) return;
+      lastHoverMs = nowMs;
       const r = canvas.getBoundingClientRect();
       ndc.x = ((e.clientX - r.left) / r.width) * 2 - 1;
       ndc.y = -((e.clientY - r.top) / r.height) * 2 + 1;
@@ -500,12 +506,40 @@ function runApp() {
     {passive: false},
   );
 
-  // Frame loop
+  // Frame loop with adaptive GPU safety net for lower-power integrated graphics
   let last = performance.now();
+  let appliedCut = 'solid';
+  let perfWarmup = 40;
+  let perfWinSum = 0;
+  let perfWinCount = 0;
   const loop = (now) => {
-    const dt = Math.min(0.05, Math.max(0.001, (now - last) / 1000));
+    const rawDtMs = now - last;
+    const dt = Math.min(0.05, Math.max(0.001, rawDtMs / 1000));
     last = now;
     T += dt;
+
+    if (!document.hidden && rawDtMs > 0 && rawDtMs < 500 && perfLevel < 2) {
+      if (perfWarmup > 0) {
+        perfWarmup--;
+      } else {
+        perfWinSum += rawDtMs;
+        if (++perfWinCount >= 30) {
+          const avgMs = perfWinSum / perfWinCount;
+          perfWinSum = 0;
+          perfWinCount = 0;
+          if (avgMs > 34) {
+            if (perfLevel === 0) {
+              perfLevel = 1;
+              st.setQuality({ao: false});
+              fit();
+            } else if (perfLevel === 1) {
+              perfLevel = 2;
+              st.setQuality({smaa: false});
+            }
+          }
+        }
+      }
+    }
 
     if (autoType) {
       demoTimer -= dt;
@@ -685,7 +719,10 @@ function runApp() {
       }
     }
 
-    st.setCut(cut, 0);
+    if (cut !== appliedCut) {
+      appliedCut = cut;
+      st.setCut(cut, 0);
+    }
     st.frame(
       {
         activeCode,
