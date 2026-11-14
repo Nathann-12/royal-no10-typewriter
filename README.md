@@ -6,6 +6,17 @@
 
 ---
 
+## 🎬 พรีวิววิดีโอเดโม (Demo Preview)
+
+![Royal No. 10 (1938) Interactive 3D Typewriter Studio Demo](media/demo-preview.gif)
+
+> **▶ วิดีโอฉบับเต็มพร้อมเสียงกลไกจริงจากตัวโปรเจค (Web Audio Foley Only — 36s, 1080p):**
+> - **[ดาวน์โหลด / เปิดชม Full HD 1080p MP4 (50.9 MB)](https://github.com/Nathann-12/royal-no10-typewriter/releases/download/v1.0.0/royal-no10-demo.mp4)**
+> - **[ดาวน์โหลด Compact 720p MP4 (8.3 MB)](https://github.com/Nathann-12/royal-no10-typewriter/releases/download/v1.0.0/royal-no10-demo-720p-under10mb.mp4)**
+> - ดูไฟล์ทั้งหมดใน **[Release v1.0.0](https://github.com/Nathann-12/royal-no10-typewriter/releases/tag/v1.0.0)** *(GitHub README รองรับภาพเคลื่อนไหว GIF แบบอัตโนมัติจากไฟล์ในรีโป ส่วนไฟล์ MP4 ฉบับเต็มพร้อมเสียงสามารถเปิด/ดาวน์โหลดได้จากหน้า Release)*
+
+---
+
 ## ✨ ฟีเจอร์หลัก (Features)
 
 - **สมจริงระดับ CAD & กลไกจริง (Kinematic Linkage)**: แป้นพิมพ์ 44 ปุ่ม (4 แถว Qwerty) ขยับก้านโยง Keylever, Sublever และ Typebar พุ่งเข้าตีผ้าหมึกสู่ลูกกลิ้ง (`platen`) แบบเรียลไทม์ พร้อมลูกกลิ้งเลื่อนแคร่ (`Carriage`), กระดิ่งเตือนขอบขวา, และคันโยกปัดแคร่ขึ้นบรรทัดใหม่
@@ -88,6 +99,8 @@ npm start
 │   └── serve.mjs      # Static HTTP server สำหรับรันทดสอบ
 ├── dist/
 │   └── index.html     # ไฟล์เว็บสำเร็จรูปพร้อมเปิดใช้งาน
+├── media/
+│   └── demo-preview.gif # วิดีโอพรีวิวแบบเคลื่อนไหวสำหรับแสดงบน README
 └── package.json
 ```
 
